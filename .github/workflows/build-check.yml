@@ -1,0 +1,83 @@
+﻿name: Build Check and Notify
+
+on:
+  push:
+    branches:
+      - staging  # Run when code is pushed to staging
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensures full commit history for git blame
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Run the Build
+        id: build
+        continue-on-error: true  # Allow workflow to continue even if the build fails
+        run: |
+          cmd /c src\build.bat || echo "Build failed, but continuing..."
+          if not exist build_errors.log (
+            echo "Error: Build failed but no error log was found." > build_errors.log
+          )
+          type build_errors.log  # Print errors for debugging
+
+      - name: Identify Faulty Line
+        id: find_error
+        if: always()  # Ensure this runs even if the previous step failed
+        run: |
+          if (Test-Path build_errors.log) {
+            $ErrorLine = Get-Content build_errors.log | Select-Object -Last 1
+            Write-Host "Captured error: $ErrorLine"
+
+            if ($ErrorLine -match "^(.*?):([0-9]+):") {
+              echo "file=$matches[1]" >> $env:GITHUB_ENV
+              echo "line=$matches[2]" >> $env:GITHUB_ENV
+              Write-Host "Error found in file: $($matches[1]) at line: $($matches[2])"
+            } else {
+              Write-Host "⚠️ No specific error line found, defaulting to test.py:1"
+              echo "file=test.py" >> $env:GITHUB_ENV
+              echo "line=1" >> $env:GITHUB_ENV
+            }
+          } else {
+            Write-Host "❌ build_errors.log NOT FOUND! Creating a default error."
+            echo "Error: Build failed, but no error log was found." > build_errors.log
+            echo "file=test.py" >> $env:GITHUB_ENV
+            echo "line=1" >> $env:GITHUB_ENV
+          }
+
+      - name: Find Author Using Git Blame
+        id: git_blame
+        if: env.file != '' && env.line != ''  # Ensure blame runs even if default values are set
+        run: |
+          $Author = git blame -L $env:line,$env:line -- $env:file | ForEach-Object { ($_ -split '\s+')[1] }
+          $AuthorEmail = git log -1 --pretty=format:"%ae" -s $Author
+          echo "email=$AuthorEmail" >> $env:GITHUB_ENV
+          Write-Host "📧 Identified author: $AuthorEmail"
+
+      - name: Send Email Notification
+        if: always()  # Ensure an email is always sent even if blame fails
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Build Failure in Staging Branch"
+          body: |
+            A build error was detected.
+
+            File: ${{ env.file }}
+            Line: ${{ env.line }}
+
+            Please check and fix it.
+          to: ${{ env.email || 'your-team-email@example.com' }}  # Default to team email if no author is found
+          from: "Build Notifier"
