@@ -1,2 +1,2 @@
 def hello():
-    print("Hello from B")
+    print("Hello from C"
